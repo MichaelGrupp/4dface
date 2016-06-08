@@ -17,6 +17,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+
+/* changes for RoboCup demo: 
+ * use the slider buttons to switch between the features
+ * click in one of the three windows to reset the face detection
+ */
+
 #include "helpers.hpp"
 
 #include "eos/core/Landmark.hpp"
@@ -57,6 +64,43 @@ using std::vector;
 using std::string;
 
 void draw_axes_topright(float r_x, float r_y, float r_z, cv::Mat image);
+
+bool have_face = false;
+bool with_merging = false;
+bool with_expression = true;
+bool with_pn = false;
+bool quit = false;
+
+void merge_button_callback(int state, void* userdata) {
+	if (state == 0)
+		with_merging = false;
+	else
+		with_merging = true;
+}
+
+void expr_button_callback(int state, void* userdata) {
+	if (state == 0)
+		with_expression = false;
+	else
+		with_expression = true;
+}
+
+void pn_button_callback(int state, void* userdata) {
+	if (state == 0)
+		with_pn = false;
+	else
+		with_pn = true;
+}
+
+void quit_button_callback(int state, void* userdata) {
+	quit = true;
+}
+
+void onMouse_reset_callback(int event, int x, int y, int flags, void* userdata) {
+	if (event != cv::EVENT_LBUTTONDOWN)
+		return;
+	have_face = false;
+}
 
 /**
  * This app demonstrates facial landmark tracking, estimation of the 3D pose
@@ -141,11 +185,21 @@ int main(int argc, char *argv[])
 	vector<morphablemodel::Blendshape> blendshapes = morphablemodel::load_blendshapes(blendshapesfile.string());
 
 	cv::namedWindow("video", 1);
-	cv::namedWindow("render", 1);
+	cv::namedWindow("rendering", 1);
+	cv::namedWindow("isomap", 1);
+
+	cv::createTrackbar("merging", "rendering", (int*)0, 1, merge_button_callback);
+	cv::createTrackbar("expression", "rendering", (int*)0, 1, expr_button_callback);
+	cv::createTrackbar("PN", "rendering", (int*)0, 1, pn_button_callback);
+	cv::createTrackbar("quit", "rendering", (int*)0, 1, quit_button_callback);
+	
+	// reset by clicking in one of the images
+	cvSetMouseCallback("video", &onMouse_reset_callback);
+	cvSetMouseCallback("rendering", &onMouse_reset_callback);
+	cvSetMouseCallback("isomap", &onMouse_reset_callback);
 
 	Mat frame, unmodified_frame;
 
-	bool have_face = false;
 	rcr::LandmarkCollection<Vec2f> current_landmarks;
 	Rect current_facebox;
 	WeightedIsomapAveraging isomap_averaging(60.f); // merge all triangles that are facing <60° towards the camera
@@ -222,40 +276,68 @@ int main(int argc, char *argv[])
 
 		// Fit the PCA shape model and expression blendshapes:
 		vector<float> shape_coefficients, blendshape_coefficients;
-		Mat shape_instance = fitting::fit_shape_model(affine_cam, morphable_model, blendshapes, image_points, vertex_indices, 10.0f, shape_coefficients, blendshape_coefficients);
+		Mat shape_instance;
+		if (with_expression)
+			shape_instance = fitting::fit_shape_model(affine_cam, morphable_model, blendshapes, image_points, vertex_indices, 10.0f, shape_coefficients, blendshape_coefficients);
+		else
+			//cout << "fitting" << endl;
+			shape_coefficients = fitting::fit_shape_to_landmarks_linear(morphable_model, affine_cam, image_points, vertex_indices);
 
 		// Draw the 3D pose of the face:
 		draw_axes_topright(rendering_params.r_x, rendering_params.r_y, rendering_params.r_z, frame);
 
 		// Get the fitted mesh, extract the texture:
-		render::Mesh mesh = morphablemodel::detail::sample_to_mesh(shape_instance, morphable_model.get_color_model().get_mean(), morphable_model.get_shape_model().get_triangle_list(), morphable_model.get_color_model().get_triangle_list(), morphable_model.get_texture_coordinates());
-		Mat isomap = render::extract_texture(mesh, affine_cam, unmodified_frame, true, render::TextureInterpolation::NearestNeighbour, 512);
+		Mat isomap;
+		if (with_expression) {
+			render::Mesh mesh = morphablemodel::detail::sample_to_mesh(shape_instance, morphable_model.get_color_model().get_mean(), morphable_model.get_shape_model().get_triangle_list(), morphable_model.get_color_model().get_triangle_list(), morphable_model.get_texture_coordinates());
+			isomap = render::extract_texture(mesh, affine_cam, unmodified_frame, true, render::TextureInterpolation::NearestNeighbour, 512);
+		}
+		else {
+			render::Mesh mesh = morphable_model.draw_sample(shape_coefficients, vector<float>());
+			isomap = render::extract_texture(mesh, affine_cam, unmodified_frame, true);
+		}
 
 		// Merge the isomaps - add the current one to the already merged ones:
-		Mat merged_isomap = isomap_averaging.add_and_merge(isomap);
+		Mat merged_isomap;
+		if (with_merging) {
+			merged_isomap = isomap_averaging.add_and_merge(isomap);
+			cv::imshow("isomap", merged_isomap);
+		}
+		else {
+			merged_isomap = isomap;
+			cv::imshow("isomap", isomap);
+		}
+		
 		// Same for the shape:
 		shape_coefficients = pca_shape_merging.add_and_merge(shape_coefficients);
-		auto merged_shape = morphable_model.get_shape_model().draw_sample(shape_coefficients) + to_matrix(blendshapes) * Mat(blendshape_coefficients);
+		Mat merged_shape;
+		if (with_expression)
+			merged_shape = morphable_model.get_shape_model().draw_sample(shape_coefficients) + to_matrix(blendshapes) * Mat(blendshape_coefficients);
+		else
+			merged_shape = morphable_model.get_shape_model().draw_sample(shape_coefficients);
 		render::Mesh merged_mesh = morphablemodel::detail::sample_to_mesh(merged_shape, morphable_model.get_color_model().get_mean(), morphable_model.get_shape_model().get_triangle_list(), morphable_model.get_color_model().get_triangle_list(), morphable_model.get_texture_coordinates());
 
 		// Render the model in a separate window using the estimated pose, shape and merged texture:
 		Mat rendering;
-		std::tie(rendering, std::ignore) = render::render(merged_mesh, fitting::to_mat(glm::rotate(glm::mat4(1.0f), rendering_params.r_z, glm::vec3{ 0.0f, 0.0f, 1.0f }) * glm::rotate(glm::mat4(1.0f), rendering_params.r_x, glm::vec3{ 1.0f, 0.0f, 0.0f }) * glm::rotate(glm::mat4(1.0f), rendering_params.r_y, glm::vec3{ 0.0f, 1.0f, 0.0f })), fitting::to_mat(glm::ortho(-130.0f, 130.0f, -130.0f, 130.0f)), 256, 256, render::create_mipmapped_texture(merged_isomap), true, false, false);
-		cv::imshow("render", rendering);
-
+		if (with_pn)
+			std::tie(rendering, std::ignore) = render::render(merged_mesh, fitting::to_mat(glm::mat4(1.0)), fitting::to_mat(glm::ortho(-130.0f, 130.0f, -130.0f, 130.0f)), 256, 256, render::create_mipmapped_texture(merged_isomap), true, false, false);
+		else
+			std::tie(rendering, std::ignore) = render::render(merged_mesh, fitting::to_mat(glm::rotate(glm::mat4(1.0f), rendering_params.r_z, glm::vec3{ 0.0f, 0.0f, 1.0f }) * glm::rotate(glm::mat4(1.0f), rendering_params.r_x, glm::vec3{ 1.0f, 0.0f, 0.0f }) * glm::rotate(glm::mat4(1.0f), rendering_params.r_y, glm::vec3{ 0.0f, 1.0f, 0.0f })), fitting::to_mat(glm::ortho(-130.0f, 130.0f, -130.0f, 130.0f)), 256, 256, render::create_mipmapped_texture(merged_isomap), true, false, false);
+			
+		cv::imshow("rendering", rendering);
 		cv::imshow("video", frame);
+		
 		auto key = cv::waitKey(30);
-		if (key == 'q') break;
-		if (key == 'r') {
-			have_face = false;
-			isomap_averaging = WeightedIsomapAveraging(60.f);
-		}
+		if (key == 'q' || quit == true) break;
 		if (key == 's') {
 			// save an obj + current merged isomap to the disk:
 			render::Mesh neutral_expression = morphablemodel::detail::sample_to_mesh(morphable_model.get_shape_model().draw_sample(shape_coefficients), morphable_model.get_color_model().get_mean(), morphable_model.get_shape_model().get_triangle_list(), morphable_model.get_color_model().get_triangle_list(), morphable_model.get_texture_coordinates());
 			render::write_textured_obj(neutral_expression, "current_merged.obj");
 			cv::imwrite("current_merged.isomap.png", merged_isomap);
+			cv::imwrite("current_rendering.png", rendering);
+			cv::imwrite("current_frame.png", frame);
 		}
+
 	}
 
 	return EXIT_SUCCESS;
