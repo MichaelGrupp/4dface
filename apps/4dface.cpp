@@ -67,7 +67,7 @@ void draw_axes_topright(float r_x, float r_y, float r_z, cv::Mat image);
 
 bool have_face = false;
 bool with_merging = false;
-bool with_expression = true;
+bool with_expression = false;
 bool with_pn = false;
 bool quit = false;
 
